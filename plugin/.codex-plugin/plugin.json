@@ -1,0 +1,10 @@
+{
+  "name": "luma-progress",
+  "version": "0.2.0",
+  "description": "Evidence-weighted task progress for the local Luma Windows companion. No native UI patching.",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "requires_local_executor": true,
+  "license": "MIT",
+  "interface": {"displayName":"Luma 对话进度","shortDescription":"按任务清单与执行证据估算完成度","developerName":"Luma contributors","category":"Productivity"}
+}

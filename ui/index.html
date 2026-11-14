@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Luma · Codex 进度</title><link rel="stylesheet" href="app.css"><script defer src="format.js"></script><script defer src="app.js"></script></head>
+<body data-size="focus">
+<main class="widget" aria-label="Codex 对话进度">
+ <header class="titlebar">
+  <div class="brand pywebview-drag-region"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 16V8m5 12V4m5 13V7m5 7v-4"/></svg><span>Luma</span><span id="demo-label" class="demo-label" hidden>演示</span></div>
+  <div class="drag-space pywebview-drag-region" aria-hidden="true"></div>
+  <div class="window-controls">
+   <button id="size-button" class="icon-button" aria-label="选择界面大小" aria-haspopup="menu" aria-expanded="false" title="选择界面大小"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 5v14"/></svg></button>
+   <button id="pin" class="icon-button" aria-label="取消置顶" aria-pressed="true" title="取消置顶"><svg viewBox="0 0 24 24"><path d="M8 4h8l-1 6 3 3v2H6v-2l3-3-1-6Zm4 11v6"/></svg></button>
+   <button id="settings-button" class="icon-button" aria-label="设置与 AI 辅助" title="设置与 AI 辅助"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="16" cy="17" r="3"/></svg></button>
+   <button id="close" class="icon-button close-button" aria-label="关闭面板" title="关闭面板"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+  </div>
+ </header>
+
+ <div class="panel-content" id="panel-content">
+  <button class="conversation" id="choose" aria-haspopup="dialog" title="选择要关注的对话"><h1 id="conversation-title">连接 Codex</h1><svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button>
+  <div class="status-line"><span id="status-dot" class="status-dot"></span><span id="status-label">连接中</span><span class="status-separator">·</span><span id="basis">本地读取</span><span id="freshness" class="freshness">等待记录</span></div>
+
+  <section class="progress-summary" aria-label="任务完成度估算">
+   <span class="metric-label">工作量估计</span>
+   <div class="percent-value"><span class="approx" id="approx">≈</span><span id="percent" class="odometer">—</span><span class="percent-sign">%</span></div>
+   <span id="progress-context" class="progress-context">等待工作清单</span>
+  </section>
+
+  <section class="eta-summary" aria-label="预计完成时间">
+   <span class="metric-label">预计剩余</span>
+   <div id="eta" class="eta-value odometer">—</div>
+   <div class="finish-line"><span class="finish-label">预计</span><span id="finish-clock" class="odometer">—</span><span class="finish-label">结束</span></div>
+  </section>
+
+  <section class="track-block" aria-label="进度与不确定范围">
+   <div id="progress-track" class="progress-track" role="progressbar" aria-label="估算完成百分比" aria-valuemin="0" aria-valuemax="100" title="长度来自估算；条内流动仅表示仍在执行">
+    <div id="uncertainty" class="uncertainty"></div><div id="progress-fill" class="progress-fill"></div>
+    <div id="scan-lane" class="scan-lane"><span></span></div><div id="confirmed-tick" class="confirmed-tick" hidden></div>
+   </div>
+   <div class="track-caption"><span id="range-text">估计范围 —</span><span id="confidence">依据待确认</span></div>
+  </section>
+
+  <section class="current-work" aria-label="当前步骤与执行事件">
+   <div class="work-mark" id="activity-symbol" aria-hidden="true"><span></span><span></span><span></span></div>
+   <div class="work-copy"><div id="current-step" class="current-step">等待可见活动</div><p id="current">读取本地会话记录…</p></div>
+  </section>
+
+  <section class="milestones" aria-labelledby="stages-title"><div class="section-heading"><h2 id="stages-title">交付清单</h2><span id="step-count">—</span></div><ol id="steps" class="steps"></ol></section>
+
+  <section class="recent" aria-labelledby="recent-title"><div class="section-heading"><h2 id="recent-title">执行轨迹</h2><span id="history-label">最近的不同事件</span></div><ul id="activities" class="activity-list"><li>等待第一条记录</li></ul></section>
+
+  <footer><div class="elapsed-line"><span class="elapsed-label">已运行</span><span id="elapsed" class="odometer" role="timer" aria-live="off">—</span></div><button id="details" class="text-button">估算依据<svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button></footer>
+ </div>
+
+ <div id="size-menu" class="size-menu" role="menu" aria-label="界面大小" hidden>
+  <button role="menuitemradio" data-layout="ribbon" aria-checked="false"><span>悬浮条</span><small>进度与结束时刻</small><i></i></button>
+  <button role="menuitemradio" data-layout="mini" aria-checked="false"><span>迷你</span><small>结果优先，一瞥读完</small><i></i></button>
+  <button role="menuitemradio" data-layout="focus" aria-checked="true"><span>专注</span><small>当前步骤与下一步</small><i></i></button>
+  <button role="menuitemradio" data-layout="full" aria-checked="false"><span>完整</span><small>清单、轨迹与证据</small><i></i></button>
+ </div>
+
+ <section class="sheet" id="thread-sheet" role="dialog" aria-labelledby="thread-sheet-title" aria-modal="true" hidden>
+  <div class="sheet-heading"><div><h2 id="thread-sheet-title">关注哪条对话</h2><p>每个估计绑定一个执行轮次。</p></div><button class="icon-button dismiss" aria-label="返回面板"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+  <label class="search"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="thread-search" placeholder="搜索对话名称" autocomplete="off" aria-label="搜索对话"></label><div id="thread-list" class="thread-list"></div>
+ </section>
+
+ <section class="sheet" id="detail-sheet" role="dialog" aria-labelledby="detail-sheet-title" aria-modal="true" hidden>
+  <div class="sheet-heading"><div><h2 id="detail-sheet-title">估算的依据</h2><p>已报告的工作量，与预测分开看。</p></div><button class="icon-button dismiss" aria-label="返回面板"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+  <div class="sheet-scroll">
+   <div class="detail-block"><span class="metric-label">工作量</span><h3 id="detail-basis">—</h3><p id="detail-reason">—</p><p id="confirmed-note"></p><p id="revision-note"></p></div>
+   <div class="detail-block"><span class="metric-label">时间预测</span><p id="eta-basis">—</p><p id="finish-range"></p></div>
+   <div class="model-evaluation"><div class="section-heading"><h3>本机留出回放</h3><span>时间预测，非工程完成度</span></div><dl><div><dt>误差中位数</dt><dd id="metric-error">—</dd></div><div><dt>两分钟内</dt><dd id="metric-two">—</dd></div><div><dt>区间覆盖</dt><dd id="metric-coverage">—</dd></div></dl></div>
+   <div class="detail-block source-facts"><div><span>会话来源</span><span id="source-name">—</span></div><div><span>清单协作</span><span id="plugin-status">—</span></div><div><span>AI 语义参考</span><span id="ai-status">关闭</span></div></div>
+   <p class="detail-footnote">真实范围变化或返工可以使估计大幅修正。动画不增加工作量；执行中的报告最多显示 95%。时间模型仍可能低估长任务。</p>
+  </div>
+ </section>
+
+ <section class="sheet" id="settings-sheet" role="dialog" aria-labelledby="settings-title" aria-modal="true" hidden>
+  <div class="sheet-heading"><div><h2 id="settings-title">按你的方式关注</h2><p>外观与估算方法独立设置。</p></div><button class="icon-button dismiss" aria-label="返回面板"><svg viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+  <div class="sheet-scroll">
+   <label class="setting"><div><strong>减少动态效果</strong><span>保留所有数据和操作</span></div><input id="reduce-motion" type="checkbox" role="switch"><span class="switch" aria-hidden="true"></span></label>
+   <label class="setting"><div><strong>清单协作</strong><span>Codex 按交付项报告实际完成量</span></div><input id="cooperative" type="checkbox" role="switch" checked><span class="switch" aria-hidden="true"></span></label>
+   <div class="settings-divider"></div>
+   <form id="assessor-form">
+    <div class="section-heading"><h3>AI 辅助估算</h3><span class="experimental">实验性 · 可选</span></div>
+    <p class="settings-copy">本地已有时间预测模型。这里可接本机语言模型或兼容 API，辅助理解剩余工作；尚不保证提升精度。</p>
+    <label class="field">服务地址<input id="ai-endpoint" type="url" placeholder="https://api.openai.com/v1" autocomplete="off"></label>
+    <label class="field">模型 ID<input id="ai-model" placeholder="填写服务支持的模型名称" autocomplete="off"></label>
+    <label class="field">API Key<input id="ai-key" type="password" placeholder="本机服务可留空" autocomplete="new-password"></label>
+    <label class="field">返回格式<select id="ai-format"><option value="json_schema">严格 JSON Schema</option><option value="json_object">JSON 兼容模式</option></select></label>
+    <label class="consent"><input id="ai-consent" type="checkbox"><span>允许向上述服务发送当前任务要求、清单、进度说明和工具名称。不发送思考过程、命令文本或工具输出。</span></label>
+    <label class="setting"><div><strong>启用 AI 参考</strong><span>最多每 90 秒评估一次；远程调用可能计费</span></div><input id="ai-enabled" type="checkbox" role="switch"><span class="switch" aria-hidden="true"></span></label>
+    <button class="primary-button" type="submit">保存估算设置</button><p id="settings-result" class="settings-result" role="status"></p>
+   </form>
+  </div>
+ </section>
+
+ <div class="notice" id="notice" role="status" hidden></div>
+</main></body></html>

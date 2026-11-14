@@ -1,0 +1,17 @@
+data/
+__pycache__/
+*.pyc
+plugin/runtime-path.json
+.taste-skill/inspect/
+.taste-skill/
+qa/
+launch-config.json
+Luma.exe
+.env
+.env.*
+*.dpapi
+*.pkl
+*.log
+.venv/
+dist/
+.agents/
