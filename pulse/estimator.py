@@ -229,18 +229,25 @@ def estimate(snapshot, history=(), now=None, time_prediction=None):
 
     eta = None
     eta_basis = "同类历史不足，暂不估计时间"
-    if active and time_prediction is not None and status != "waiting" and snapshot.get("source_age", 0) < 180:
+    if status == "working" and time_prediction is not None and (
+        snapshot.get("source_age", 0) < 180 or snapshot.get("operation_running")
+    ):
         eta = time_prediction.get('range') if time_prediction.get('available') else None
         eta_basis = time_prediction['reason']
-    elif active and time_prediction is None and forecast and status != "waiting" and snapshot.get("source_age", 0) < 180:
+    elif status == "working" and time_prediction is None and forecast and snapshot.get("source_age", 0) < 180:
         eta = [round(forecast[0]), round(forecast[2])]
         eta_basis = f"参考 {sample_count} 次同类本地执行；预测本轮结束时间"
-    elif active and time_prediction is None and steps and checklist and point > 10 and status != "waiting":
+    elif status == "working" and time_prediction is None and steps and checklist and point > 10:
         remaining = elapsed * (100 - point) / point
         eta = [round(remaining * .5), round(remaining * 1.8)]
         eta_basis = "按清单速度外推，尚未经过历史校准"
     if status == "waiting":
         current, eta_basis = "等待你批准操作", "等待期间不估计剩余时间"
+    elif status == "working" and time_prediction is not None:
+        if snapshot.get("source_age", 0) >= 180 and not snapshot.get("operation_running"):
+            eta_basis = "超过三分钟未收到可见活动，暂停时间预测"
+    elif status in ("ended", "partial", "interrupted", "failed"):
+        eta_basis = "预测记录保留本轮时间估计"
     eta_mid = None
     if eta:
         eta_mid = (time_prediction or {}).get('median',round((eta[0]+eta[1])/2))

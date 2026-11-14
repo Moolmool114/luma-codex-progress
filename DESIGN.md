@@ -19,3 +19,7 @@ The desktop bridge handles DPI conversion, size selection and window pinning. He
 - Native and browser checks are documented accurately in release notes; browser-only checks do not prove native pointer behavior.
 - The actual Windows WebView2 window was launched outside the sandbox desktop and visually checked. Coordinate input opened the native size menu and selected the focus layout; its width and content reflow changed correctly. UIA element clicks lacked geometry, so they were not counted as passing input tests.
 - Source style lint completed with zero failures. Remaining warnings cover actual floating overlays, clock zero padding and missing-value dashes.
+
+The 0.3 review opens from the ETA in every layout. The actual finish leads the completed view. Two aligned intervals place the first and last estimates on the same clock, with the error and issue time beneath each estimate. The AI section links each change to its advice and compares time estimates once an outcome is available.
+
+The Windows panel was verified with an actual live AI assessment and a separate synthetic completed turn. The review screenshot contains the synthetic example.

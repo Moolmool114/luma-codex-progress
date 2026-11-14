@@ -13,10 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from pulse.estimator import estimate
+from pulse.estimator import classify, estimate
+from pulse.journal import PredictionJournal, TERMINAL
+from pulse.learning import calibrate, finish_prediction, replace_time, trust_advisor
 from pulse.source import CodexSource, read_json
 from pulse.forecast import LocalForecast
-from pulse.assessor import Assessor,endpoint_url,apply_assessment
+from pulse.assessor import Assessor, apply_assessment, endpoint_url
 
 ROOT = Path(__file__).resolve().parent
 _mutex = None
@@ -34,7 +36,6 @@ class Application:
         else:
             self.source = CodexSource(home, data)
             self.forecast = LocalForecast(home,data)
-        self.assessor = Assessor(data)
         self.config = read_json(data / "settings.json", {})
         self.selected = thread_id or self.config.get("threadId")
         self.window = None
@@ -47,6 +48,22 @@ class Application:
         self.expanded_height = 680
         self.server = None
         self.token = secrets.token_urlsafe(24)
+        self.state_lock = threading.RLock()
+        self.journal_error = False
+        try:
+            self.journal = PredictionJournal(data)
+        except (OSError, sqlite3.Error):
+            self.journal = None
+            self.journal_error = True
+        self.assessor = Assessor(data, record=self.record_advice)
+        self.last_reconciliation = 0
+        self.last_learning = 0
+        self.calibration_records = []
+        self.observed_scores = None
+        self.advisor_scores = {}
+        if demo and self.journal:
+            from pulse.demo import seed_review
+            seed_review(self.journal, self.source)
 
     def save(self):
         with self.lock:
@@ -57,10 +74,12 @@ class Application:
             temp.replace(target)
 
     def state(self, thread_id=None):
-        if thread_id:
-            selected = thread_id
-        else:
-            selected = self.selected
+        with self.state_lock:
+            return self._state(thread_id)
+
+    def _state(self, thread_id):
+        self.reconcile(time.time())
+        selected = thread_id or self.selected
         if not selected:
             threads = self.source.threads(limit=1)
             if not threads:
@@ -69,12 +88,113 @@ class Application:
             self.selected = selected
             self.save()
         snapshot = self.source.snapshot(selected)
-        prediction = estimate(snapshot, self.source.history(),time_prediction=self.forecast.predict(snapshot,max(0,time.time()-snapshot['started_at'])))
-        ai=self.assessor.inspect({} if self.demo else self.config.get('assessor',{}),snapshot,prediction)
-        prediction=apply_assessment(prediction,ai)
-        result = {**prediction, "thread_id": selected, "title": snapshot["title"], "turn_id": snapshot["turn_id"], "source": snapshot["source"], "age": round(snapshot["source_age"]), "source_partial": snapshot["partial"], "now": time.time(), "topmost": self.topmost, "cooperative": self.config.get("cooperative", True), "plugin_installed": (self.home/'plugins'/'cache'/'luma-local'/'luma-progress').is_dir()}
-        result.update(size=self.view_size,reduced_motion=self.config.get('reduced_motion',False),ai=ai,metrics=self.forecast.model.get('metrics') if self.forecast.model else None,demo=self.demo)
-        return result
+        turn_id = snapshot["turn_id"]
+        snapshot["thread_id"] = selected
+        now = time.time()
+        elapsed = max(0, now - snapshot["started_at"])
+        history = self.source.history()
+        self.forecast.refresh(history)
+        timing = self.forecast.predict(snapshot, elapsed, history)
+        operation = self.forecast.operation(snapshot, now)
+        snapshot["operation_running"] = operation is not None
+        prediction = estimate(snapshot, history, now=now, time_prediction=timing)
+        if prediction["status"] != "working":
+            operation = None
+        raw_local = finish_prediction(prediction)
+        method = timing.get("method", "unknown")
+        kind = classify(snapshot.get("prompt", ""))
+        local, learning = calibrate(self.calibration_records, raw_local, kind, method, elapsed, now)
+        if learning["applied"]:
+            replace_time(prediction, local, now, prediction["eta_basis"] + " · 已用本机实测校准")
+        learning.update(trained_at=self.forecast.trained_at, training=self.forecast.training,
+                        observed=self.observed_scores)
+        config = self.config.get("assessor", {}) if not self.demo and selected == self.selected else {}
+        ai = self.assessor.inspect(config, snapshot, prediction)
+        scores = self.advisor_scores.get(self.assessor.provider(config)) if ai["enabled"] else None
+        ai["scores"] = scores
+        if self.demo:
+            ai.update(self.source.demo_advice(snapshot))
+        prediction = apply_assessment(prediction, ai, now, use_time=trust_advisor(scores))
+        comparison = None
+        if self.journal and turn_id:
+            try:
+                status, ended_at = snapshot["status"], snapshot.get("completed_at")
+                if status in TERMINAL:
+                    if self.journal.close_turn(selected, turn_id, status, ended_at):
+                        self.last_learning = 0
+                        self.reconcile(now)
+                    comparison = self.journal.comparison(selected, turn_id)
+                elif status in ("inProgress", "in_progress"):
+                    issued = finish_prediction(prediction)
+                    impact = prediction.get("ai_impact")
+                    sample = None
+                    if issued and prediction["status"] == "working":
+                        sample = {
+                            "at": now, "displayed": issued, "raw_local": raw_local, "local": local,
+                            "local_method": method, "method": method + ("+learned" if learning["applied"] else ""),
+                        }
+                        if impact and impact["id"]:
+                            sample.update(advisor=impact["id"], advisor_used=impact["timing"] == "applied")
+                    self.journal.observe(selected, turn_id, kind, snapshot["started_at"], now, sample)
+                    if impact and impact["id"]:
+                        self.journal.decide(impact["id"], impact)
+            except (OSError, sqlite3.Error):
+                self.journal_error = True
+        learning["observed"] = self.observed_scores
+        model = self.forecast.model
+        return {
+            **prediction, "thread_id": selected, "title": snapshot["title"], "turn_id": turn_id,
+            "source": snapshot["source"], "age": round(snapshot["source_age"]), "source_partial": snapshot["partial"],
+            "now": now, "topmost": self.topmost, "cooperative": self.config.get("cooperative", True),
+            "plugin_installed": (self.home/"plugins"/"cache"/"luma-local"/"luma-progress").is_dir(),
+            "size": self.view_size, "reduced_motion": self.config.get("reduced_motion", False),
+            "ai": ai, "metrics": model["metrics"] if model else None, "demo": self.demo,
+            "learning": learning, "operation": operation, "comparison": comparison,
+            "journal_available": self.journal is not None and not self.journal_error,
+        }
+
+    def record_advice(self, thread_id, turn_id, provider, event):
+        try:
+            if self.journal:
+                self.journal.assessment_event(thread_id, turn_id, provider, event)
+        except (OSError, sqlite3.Error):
+            self.journal_error = True
+
+    def reconcile(self, now):
+        if not self.journal:
+            return
+        try:
+            if now-self.last_reconciliation >= 12:
+                self.last_reconciliation = now
+                pending = self.journal.pending()
+                if pending:
+                    try:
+                        outcomes = self.source.outcomes(pending)
+                    except (OSError, sqlite3.Error):
+                        outcomes = ()  # The selected turn can still close from its rollout.
+                    for thread_id, turn_id, status, ended_at in outcomes:
+                        if self.journal.close_turn(thread_id, turn_id, status, ended_at):
+                            self.last_learning = 0
+            if now-self.last_learning >= 30:
+                self.calibration_records = self.journal.calibration(now)
+                self.observed_scores = self.journal.observed_scores()
+                provider = self.assessor.provider(self.config.get("assessor", {}))
+                self.advisor_scores = {provider: self.journal.advisor_scores(provider, now)}
+                self.last_learning = now
+                self.journal_error = False
+        except (OSError, sqlite3.Error):
+            self.journal_error = True
+
+    def prediction_history(self, thread_id, turn_id=None):
+        self.source._thread(thread_id)
+        if not self.journal:
+            return {"turns": [], "record": None}
+        turns = self.journal.recent(thread_id)
+        turn_id = turn_id or (turns[0]["turn_id"] if turns else None)
+        record = self.journal.review(thread_id, turn_id) if turn_id else None
+        if record and record.get("started_at") is None and not record.get("advice"):
+            record = None
+        return {"turns": turns, "record": record}
 
     # This bridge is exposed only to the embedded, local UI, never over HTTP.
     def select_thread(self, thread_id):
@@ -131,10 +251,15 @@ class Application:
         model=str(settings.get('model','')).strip()[:160]
         if enabled and (not endpoint or not model or settings.get('consent') is not True):
             raise ValueError('启用前请填写服务、模型，并确认发送范围')
-        key=settings.get('key','')
-        if key:self.assessor.keys.save(key)
         cfg=dict(enabled=enabled,consent=settings.get('consent') is True,endpoint=endpoint,model=model,format='json_object' if settings.get('format')=='json_object' else 'json_schema')
-        self.config['assessor']=cfg;self.assessor.result=None;self.assessor.compatible.clear();self.save()
+        with self.state_lock:
+            key=settings.get('key','')
+            if key:
+                self.assessor.keys.save(key)
+            self.assessor.reset()
+            self.config['assessor'] = cfg
+            self.last_learning = 0
+            self.save()
         return self.preferences()
 
     def set_reduced_motion(self,value):
@@ -192,10 +317,13 @@ def make_server(app):
                     rows = app.source.threads(args.get("q", [""])[0])
                     return self.send(200, [{k: row[k] for k in ("id", "title", "updated_at")} for row in rows])
                 if name == "api/ping":
-                    return self.send(200, {"app": "Luma", "version": "0.2.1"})
+                    return self.send(200, {"app": "Luma", "version": "0.3.0"})
+                if name == "api/predictions":
+                    return self.send(200, app.prediction_history(
+                        args.get("thread", [""])[0], args.get("turn", [None])[0]))
                 if name == 'api/settings':
                     return self.send(200,app.preferences())
-                allowed = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "format.js": "text/javascript; charset=utf-8"}
+                allowed = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "format.js": "text/javascript; charset=utf-8", "review.js": "text/javascript; charset=utf-8"}
                 if name in allowed and (ui / name).is_file():
                     return self.send(200, (ui / name).read_bytes(), allowed[name])
                 return self.send(404, {"error": "Not found"})
@@ -268,7 +396,8 @@ def main():
         kernel = ctypes.WinDLL('kernel32', use_last_error=True)
         kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
         kernel.CreateMutexW.restype = ctypes.c_void_p
-        _mutex = kernel.CreateMutexW(None, False, 'Local\\Luma-' + hashlib.sha256(str(ROOT).encode()).hexdigest()[:20])
+        instance = str(ROOT) if not args.demo else str(args.data.resolve()) + "/demo"
+        _mutex = kernel.CreateMutexW(None, False, 'Local\\Luma-' + hashlib.sha256(instance.encode()).hexdigest()[:20])
         if ctypes.get_last_error() == 183:
             return
     if args.demo:args.data=args.data/'demo'
@@ -285,7 +414,8 @@ def main():
         return
     import webview
     width,height=SIZES[app.view_size]
-    app.window = webview.create_window("Luma · Codex 进度", url, js_api=DesktopBridge(app), width=width, height=height, min_size=(320,110), frameless=True, easy_drag=False, resizable=False, on_top=app.topmost, focus=True, background_color="#111111", text_select=False)
+    title = "Luma · 演示" if args.demo else "Luma · Codex 进度"
+    app.window = webview.create_window(title, url, js_api=DesktopBridge(app), width=width, height=height, min_size=(320,110), frameless=True, easy_drag=False, resizable=False, on_top=app.topmost, focus=True, background_color="#111111", text_select=False)
     def record_position():
         try:
             app.config.update(x=round(app.window.x), y=round(app.window.y))

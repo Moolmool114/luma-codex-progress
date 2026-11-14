@@ -7,6 +7,7 @@ const native = () => window.pywebview?.api;
 let state = null, selected = null, polling = false, size = "focus", nativeInitialized = false;
 let reduced = localStorage.getItem("luma.reduced") === "true", previousFocus, noticeTimer, fitTimer;
 let settingsLoaded = false, searchTimer, searchSerial = 0, receivedAt = 0;
+let reviewUpdatedAt = 0;
 const canAnimate = () => !reduced && !systemReduced.matches;
 const api = async (path, signal) => {
   const response = await fetch(new URL(path, location.href), {cache: "no-store", signal});
@@ -145,11 +146,22 @@ function tick() {
   const elapsed = working || state.status === "waiting" ? Math.max(0, now - state.started_at) : state.elapsed;
   animateText($("elapsed"), F.elapsed(elapsed));
   const unavailable = {waiting: "等待操作", ended: "已结束", partial: "本轮结束", interrupted: "已中断", failed: "执行失败", unknown: "待估算"};
-  const eta = working && Number.isFinite(state.finish_at) ? F.remaining(state.finish_at - now) : unavailable[state.status] || "待估算";
+  const terminal = ["ended", "partial", "interrupted", "failed"].includes(state.status);
+  const estimateAvailable = working && Number.isFinite(state.finish_at);
+  const ended = terminal && Number.isFinite(state.completed_at);
+  const previousForecast = state.comparison?.last?.displayed.finish;
+  const eta = ended ? F.clock(state.completed_at, now) :
+    estimateAvailable ? F.remaining(state.finish_at - now) : unavailable[state.status] || "待估算";
+  const endLabel = {interrupted: "中断时刻", failed: "失败时刻"}[state.status] || "实际结束";
+  text("eta-label", ended ? endLabel : terminal ? "本轮结果" : "预计剩余");
   animateText($("eta"), eta);
-  const showClock = working && Number.isFinite(state.finish_at);
-  $("finish-clock").parentElement.hidden = !showClock;
-  if (showClock) animateText($("finish-clock"), F.clock(state.finish_at, now));
+  const showComparison = ended && Number.isFinite(previousForecast);
+  $("finish-clock").parentElement.hidden = !estimateAvailable && !showComparison;
+  text("finish-prefix", showComparison ? "曾预计" : "预计");
+  text("finish-suffix", "结束");
+  if (estimateAvailable || showComparison) {
+    animateText($("finish-clock"), F.clock(showComparison ? previousForecast : state.finish_at, now));
+  }
   text("freshness", state.age < 30 ? "刚刚更新" : F.age(state.now - state.age, now) + "更新");
   document.querySelectorAll("#activities time").forEach(el => { el.textContent = F.age(Number(el.dataset.at), now); });
 }
@@ -183,22 +195,40 @@ function render(next) {
   $("confirmed-tick").style.left = (next.confirmed_percent || 0) + "%";
   $("confirmed-tick").title = "清单已报告 " + next.confirmed_percent + "%";
   text("range-text", next.status === "ended" ? "执行已结束" : "估计范围 " + range[0] + "–" + range[1] + "%");
-  text("confidence", next.confidence === "实验" ? "AI 参考 · 未校准" : next.has_checklist ? "按已报告工作量" : "活动线索 · 低把握");
+  const impact = next.ai_impact;
+  let confidence = next.has_checklist ? "按已报告工作量" : "活动线索 · 低把握";
+  if (impact) {
+    if (impact.progress === "applied") confidence = "AI 调整进度";
+    if (impact.timing === "applied") confidence = impact.progress === "applied" ? "AI 调整进度和时间" : "AI 校正时间";
+    if (impact.progress !== "applied" && impact.timing !== "applied") confidence = "已有 AI 建议";
+  }
+  text("confidence", confidence);
+  $("review-button").hidden = !next.comparison && !impact;
+  text("review-label", next.comparison ? "预测复盘" : "AI 记录");
   const steps = next.steps || [], active = steps.find(row => ["in_progress", "inProgress"].includes(row.status));
   text('stages-title', next.has_checklist ? '交付清单' : next.basis === '结构化计划' ? '执行计划' : '可见阶段');
   text("progress-context", next.has_checklist ? "已完成部分按工作量加权" : "依据可见活动估计");
   text("step-count", next.has_checklist ? (next.completed_count || 0) + " / " + (next.total_count || steps.length) : "未接入协作清单");
-  const currentTitle = active?.label || active?.step || (next.status === "ended" ? "本轮执行结束" : next.current || "等待执行事件");
+  const currentTitle = next.status !== "working" ? next.current : active?.label || active?.step || next.current || "等待执行事件";
   if (!changedTurn && $("current-step").textContent !== currentTitle) pulseChange($("current-step"));
   text("current-step", currentTitle);
   const currentDetail = next.current && next.current !== currentTitle ? next.current : next.activities?.find(row => row.text !== currentTitle)?.text || "";
   text("current", currentDetail); $("current").hidden = !currentDetail || currentDetail === currentTitle;
+  const op = next.operation;
+  const opRange = op ? F.span(op.range[0]) + " – " + F.span(op.range[1]) : "";
+  $("operation-eta").hidden = !op;
+  text("operation-eta", op ? op.label + " · 预计还需 " + opRange : "");
   renderSteps(steps); renderActivities(next.activities || []);
   text("detail-basis", next.basis); text("detail-reason", next.reason);
   text("confirmed-note", next.has_checklist ? "已报告完成量 " + (next.confirmed_percent ?? next.percent) + "%。进行中的项目只有明确完成的子单元才计入。" : "没有协作清单时，活动无法证明工程完成比例。此时百分比仅是低把握的参考。");
   text("revision-note", next.change_reason || "范围和权重变化会更新估计；不会为了动画抑制修正。");
   text("eta-basis", next.eta_basis);
   text("finish-range", next.finish_range ? "预计结束区间 " + F.clock(next.finish_range[0], next.now) + " – " + F.clock(next.finish_range[1], next.now) + "（剩余 " + F.range(next.eta) + "）" : "当前没有可用的时间区间。");
+  text("operation-details", op ? op.label + "预计还需 " + opRange + "。参考 " + op.count + " 次已运行到这一时长的同类操作。" : "");
+  const learning = next.learning;
+  text("learning-details", learning?.applied ? "本机学习已校准当前时间。近期对照中位误差 " +
+    F.span(learning.baseline_error) + " → " + F.span(learning.learned_error) + "。" :
+    learning?.count ? "已积累 " + learning.count + " 条可比较的本机记录。" : "");
   const m = next.metrics;
   text("metric-error", m ? (m.medianAbsoluteErrorSeconds / 60).toFixed(1) + " 分钟" : "数据不足");
   text("metric-two", m ? Math.round(m.withinTwoMinutes * 100) + "%" : "—");
@@ -207,11 +237,19 @@ function render(next) {
   text("source-name", next.source);
   text("plugin-status", next.plugin_connected ? "已连接" : next.plugin_installed ? "已安装 · 等待新任务" : "未连接 · 只读模式");
   const ai = next.ai || {};
-  text("ai-status", !ai.enabled ? "关闭" : ai.error || (ai.busy ? "正在评估" : ai.assessment ? ai.assessment.format_fallback ? "参考已更新 · JSON 兼容模式" : "参考已更新" : "等待评估"));
+  let advisorStatus = ai.enabled ? "等待评估" : "关闭";
+  if (ai.enabled && ai.assessment) advisorStatus = ai.assessment.format_fallback ? "已收到 · JSON 兼容模式" : "已收到建议";
+  if (ai.enabled && ai.busy) advisorStatus = "正在评估";
+  if (ai.enabled && ai.error) advisorStatus = ai.error;
+  text("ai-status", advisorStatus);
   if (!settingsLoaded) $("cooperative").checked = next.cooperative;
   $("pin").setAttribute("aria-pressed", String(next.topmost));
   $("pin").setAttribute("aria-label", next.topmost ? "取消置顶" : "始终置顶");
   $("pin").title = next.topmost ? "取消置顶" : "始终置顶";
+  if (!$("review-sheet").hidden && (changedTurn || Date.now() - reviewUpdatedAt > 4000)) {
+    reviewUpdatedAt = Date.now();
+    review.load(next, null, true);
+  }
   tick(); fitWindow();
 }
 async function poll() {
@@ -226,7 +264,8 @@ async function poll() {
   } finally { clearTimeout(timeout); polling = false; }
 }
 function openSheet(id) {
-  closeSize(); previousFocus = document.activeElement;
+  closeSize();
+  if (document.querySelector(".sheet:not([hidden])") === null) previousFocus = document.activeElement;
   document.querySelectorAll(".sheet").forEach(el => { el.hidden = el.id !== id; });
   document.body.classList.add("sheet-open");
   $("panel-content").inert = true;
@@ -245,7 +284,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape") { closeSize(); closeSheets(); }
   const sheet = [...document.querySelectorAll(".sheet")].find(el => !el.hidden);
   if (event.key === "Tab" && sheet) {
-    const nodes = [...sheet.querySelectorAll("button,input,select")].filter(el => !el.disabled && el.offsetParent);
+    const nodes = [...sheet.querySelectorAll("button,input,select,summary")].filter(el => !el.disabled && el.offsetParent);
     if (event.shiftKey && document.activeElement === nodes[0]) { event.preventDefault(); nodes.at(-1)?.focus(); }
     else if (!event.shiftKey && document.activeElement === nodes.at(-1)) { event.preventDefault(); nodes[0]?.focus(); }
   }
@@ -256,6 +295,14 @@ document.addEventListener("keydown", event => {
   }
 });
 $("details").addEventListener("click", () => openSheet("detail-sheet"));
+function openReview() {
+  if (!state?.turn_id) return;
+  openSheet("review-sheet");
+  reviewUpdatedAt = Date.now();
+  review.load(state, state.turn_id);
+}
+["eta-review", "review-button", "detail-review"].forEach(id => $(id).addEventListener("click", openReview));
+$("review-turn").addEventListener("change", event => review.load(state, event.target.value));
 async function listThreads(query = "") {
   const serial = ++searchSerial;
   try {

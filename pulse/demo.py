@@ -3,6 +3,7 @@ import time
 
 SESSION='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 TURN='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+REVIEWED='cccccccc-cccc-cccc-cccc-cccccccccccc'
 
 class DemoSource:
     def __init__(self):self.start=time.time()-18*60-32
@@ -11,6 +12,14 @@ class DemoSource:
     def _thread(self,identifier):
         if identifier!=SESSION:raise ValueError('Unknown demo conversation')
     def history(self):return []
+    def outcomes(self, keys):return []
+    def demo_advice(self, snapshot):
+        issued = self.start + 18*60
+        return {"enabled": True, "assessment": {
+            "at": issued, "age": time.time()-issued, "percent": 72, "id": "demo-live",
+            "remaining_seconds": [420, 780, 1560], "evidence_ids": ["demo-3"],
+            "explanation": "四种尺寸已联通，剩余工作集中在交互核查与发布。",
+        }}
     def snapshot(self,identifier):
         self._thread(identifier);now=time.time()
         steps=[
@@ -29,4 +38,44 @@ class DemoSource:
 
 class DemoForecast:
     model=None
-    def predict(self,snapshot,elapsed):return dict(available=True,range=[7*60,22*60],median=14*60,reason='合成演示，不代表实际预测表现')
+    trained_at=None
+    training=False
+    def refresh(self, history):pass
+    def operation(self, snapshot, now):
+        return {"label": "界面操作", "range": [8, 42], "median": 18, "count": 24}
+    def predict(self,snapshot,elapsed,history=()):return dict(available=True,range=[7*60,22*60],median=14*60,method="duration",reason="合成演示")
+
+
+def seed_review(journal, source):
+    """An illustrative completed turn, stored only in the demo profile."""
+    if journal.comparison(SESSION, REVIEWED) is None:
+        seed_completed_review(journal, source.start - 65*60)
+    live = source.demo_advice({})["assessment"]
+    journal.assessment_event(SESSION, TURN, "demo", {
+        **live, "state": "ready", "received_at": live["at"]+3,
+    })
+
+
+def seed_completed_review(journal, start):
+    end = start + 32*60
+    for elapsed, estimate in [(45, 23*60), (19*60, 34*60), (26*60, 30*60+40)]:
+        at = start + elapsed
+        finish = start + estimate
+        point = {"finish": finish, "low": finish-4*60, "high": finish+6*60}
+        journal.observe(SESSION, REVIEWED, "design", start, at, {
+            "at": at, "displayed": point, "local_method": "duration", "method": "duration",
+            "raw_local": point, "local": point,
+        })
+    event = {
+        "id": "demo-after-review", "state": "ready", "at": start+18*60+56,
+        "received_at": start+19*60, "percent": 68, "remaining_seconds": [600, 784, 1080],
+        "explanation": "剩余主要是验证与交付，暂未发现新增实施项。", "evidence_ids": ["demo-3"],
+    }
+    journal.assessment_event(SESSION, REVIEWED, "demo", event)
+    journal.decide(event["id"], {
+        "at": start+19*60, "progress": "applied", "base_percent": 62, "suggested_percent": 68,
+        "displayed_percent": 68, "timing": "observing", "local_finish": start+34*60,
+        "ai_finish": end, "ai_range": [event["at"]+600, event["at"]+1080],
+        "blend_finish": start+33*60+30, "displayed_finish": start+34*60,
+    })
+    journal.close_turn(SESSION, REVIEWED, "completed", end)

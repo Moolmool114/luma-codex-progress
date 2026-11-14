@@ -38,5 +38,13 @@
     const n = Math.max(0, now - timestamp);
     return n < 20 ? "刚刚" : n < 60 ? Math.floor(n) + " 秒前" : n < 3600 ? Math.floor(n / 60) + " 分钟前" : Math.floor(n / 3600) + " 小时前";
   }
-  return {remaining, elapsed, clock, range, age};
+  function span(seconds) {
+    if (!valid(seconds)) return "—";
+    const value = Math.max(0, Math.round(seconds));
+    const hours = Math.floor(value/3600), minutes = Math.floor(value%3600/60), tail = value%60;
+    if (hours) return hours + " 小时" + (minutes ? " " + minutes + " 分" : "");
+    if (minutes) return minutes + " 分" + (tail ? " " + tail + " 秒" : "钟");
+    return value + " 秒";
+  }
+  return {remaining, elapsed, clock, range, age, span};
 });

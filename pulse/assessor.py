@@ -10,8 +10,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from .learning import blend_eta, finish_prediction, replace_time
 
 
 def endpoint_url(value):
@@ -173,62 +176,146 @@ def friendly_error(error):
 
 
 class Assessor:
-    def __init__(self,data):
-        self.keys=KeyStore(data);self.result=None;self.busy=False;self.error=None
-        self.last_request=0;self._lock=threading.Lock();self.compatible=set()
+    def __init__(self, data, record=None):
+        self.keys = KeyStore(data)
+        self.record = record
+        self.result = None
+        self.active = None
+        self.error = None
+        self.last_request = 0
+        self.generation = 0
+        self._lock = threading.Lock()
+        self.compatible = set()
 
-    def inspect(self,config,snapshot,estimate):
-        enabled=bool(config.get('enabled') and config.get('consent'))
-        status=dict(enabled=enabled,busy=self.busy,error=self.error,configured=bool(config.get('endpoint') and config.get('model')),key_saved=self.keys.exists())
-        if not enabled:return status
-        payload=context(snapshot,estimate)
-        scope=(snapshot['turn_id'],snapshot.get('checklist',{}).get('revision'),config.get('endpoint'),config.get('model'))
-        fingerprint=hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
-        now=time.time()
-        if estimate['status']=='working' and not self.busy and now-self.last_request>=90 and (not self.result or self.result.get('fingerprint')!=fingerprint):
-            self.busy=True;self.last_request=now;self.error=None
-            threading.Thread(target=self._request,args=(dict(config),payload,scope,fingerprint,now),daemon=True).start()
-        current=self.result
-        if current and current['scope']==scope and now-current['at']<300:
-            status['assessment']={**current['value'],'age':round(now-current['at'])}
+    @staticmethod
+    def provider(config):
+        identity = (config.get("endpoint"), config.get("model"))
+        return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+    def reset(self):
+        with self._lock:
+            self.generation += 1
+            self.result = self.error = None
+            self.compatible.clear()
+
+    def inspect(self, config, snapshot, estimate):
+        enabled = bool(config.get("enabled") and config.get("consent"))
+        configured = bool(config.get("endpoint") and config.get("model"))
+        status = {"enabled": enabled, "configured": configured, "busy": False,
+                  "error": None, "key_saved": self.keys.exists()}
+        if not enabled or not configured:
+            return status
+        now = time.time()
+        provider = self.provider(config)
+        with self._lock:
+            scope = (
+                snapshot.get("thread_id"), snapshot["turn_id"], estimate.get("checklist_revision"),
+                hashlib.sha256(snapshot.get("prompt", "").encode()).hexdigest(),
+                provider, self.generation,
+            )
+            due = now-self.last_request >= 90
+            if (estimate["status"] == "working" and due and self.active is None
+                    and snapshot.get("source_age", 0) < 180):
+                self.active = scope
+                self.last_request = now
+                self.error = None
+                payload = context(snapshot, estimate)
+                event = {"id": uuid.uuid4().hex, "at": now, "state": "pending"}
+                self._record(scope, event)
+                threading.Thread(target=self._request, args=(dict(config), payload, scope, event),
+                                 daemon=True).start()
+            status["busy"] = self.active == scope
+            if self.error and self.error["scope"] == scope:
+                status["error"] = self.error["message"]
+            current = self.result
+            if estimate["status"] == "working" and current and current["scope"] == scope:
+                age = max(0, now-current["event"]["at"])
+                if age < 300:
+                    status["assessment"] = {**current["event"], "age": age, "provider": provider}
         return status
 
-    def _request(self,config,payload,scope,fingerprint,at):
+    def _record(self, scope, event):
+        if self.record and scope[0] and scope[1]:
+            self.record(scope[0], scope[1], scope[4], event)
+
+    def _request(self, config, payload, scope, event):
         try:
-            key=self.keys.get()
-            if urlsplit(config['endpoint']).hostname not in ('localhost','127.0.0.1','::1') and not key:
-                raise ValueError('A remote service requires an API key')
-            provider=(config.get('endpoint'),config.get('model'))
-            if config.get('format')!='json_object' and provider in self.compatible:
-                config={**config,'format':'json_object','_compatibility':True}
-            value=request_assessment(config,key,payload)
-            if value.get('format_fallback'):self.compatible.add(provider)
-            with self._lock:self.result=dict(value=value,scope=scope,fingerprint=fingerprint,at=at)
+            with self._lock:
+                if self.generation != scope[-1]:
+                    self._record(scope, {**event, "state": "superseded"})
+                    return
+                key = self.keys.get()
+                if scope[4] in self.compatible and config.get("format") != "json_object":
+                    config = {**config, "format": "json_object", "_compatibility": True}
+            if urlsplit(config["endpoint"]).hostname not in ("localhost", "127.0.0.1", "::1") and not key:
+                raise ValueError("A remote service requires an API key")
+            value = request_assessment(config, key, payload)
+            if key:
+                value["explanation"] = value["explanation"].replace(key, "[redacted-key]")
+            labels = {"fileChange": "文件更新", "commandExecution": "命令执行", "mcpToolCall": "工具调用",
+                      "agentMessage": "进展说明", "webSearch": "网页检索"}
+            references = set(value["evidence_ids"])
+            value["evidence_labels"] = list(dict.fromkeys(
+                labels[item["type"]] for item in payload["evidence"] if item["id"] in references
+            ))
+            event = {**event, **value, "state": "ready", "received_at": time.time()}
+            self._record(scope, event)
+            with self._lock:
+                if self.generation == scope[-1]:
+                    if value.get("format_fallback"):
+                        self.compatible.add(scope[4])
+                    self.result = {"scope": scope, "event": event}
         except Exception as error:
-            # Never echo response bodies, URLs, headers, or task content to logs.
-            self.error=friendly_error(error)
-        finally:self.busy=False
+            message = friendly_error(error)
+            self._record(scope, {**event, "state": "error", "error": message,
+                                 "received_at": time.time()})
+            with self._lock:
+                self.error = {"scope": scope, "message": message}
+        finally:
+            with self._lock:
+                self.active = None
 
 
-def apply_assessment(estimate,status):
-    assessment=status.get('assessment')
-    if not assessment or estimate['status']!='working':return estimate
-    result=dict(estimate)
-    lower=estimate.get('confirmed_percent')
-    if lower is None:lower=0
+def apply_assessment(estimate, status, now=None, use_time=False):
+    assessment = status.get("assessment")
+    if not assessment or estimate["status"] != "working":
+        return estimate
+    now = time.time() if now is None else now
+    result = dict(estimate)
+    lower = estimate.get("confirmed_percent") or 0
     # A semantic opinion cannot erase reported work, exceed active scope, declare
     # a run completed, or alter the checklist. Disagreement stays inspectable.
-    upper=min(95,estimate['range'][1]) if estimate.get('has_checklist') else 95
-    candidate=assessment['percent']
-    if lower<=candidate<=upper:
-        result.update(percent=candidate,basis='AI 辅助',confidence='实验',reason=assessment['explanation'])
-        result['range']=[min(estimate['range'][0],candidate),max(estimate['range'][1],candidate)]
-    age=assessment['age']
-    low,mid,high=[max(1,n-age) for n in assessment['remaining_seconds']]
-    result.update(ai_reference=assessment)
-    # Preserve disagreement rather than pretending averaging creates accuracy.
-    if estimate.get('eta'):
-        low=min(low,estimate['eta'][0]);high=max(high,estimate['eta'][1])
-    result.update(eta=[low,high],eta_median=mid,finish_at=time.time()+mid,
-                  finish_range=[time.time()+low,time.time()+high],eta_basis='AI 语义参考＋本地模型区间；尚未量化 AI 的精度收益')
+    upper = min(95, estimate["range"][1]) if estimate.get("has_checklist") else 95
+    candidate = assessment["percent"]
+    progress = "outside_scope"
+    if lower <= candidate <= upper:
+        progress = "same" if candidate == estimate["percent"] else "applied"
+        if progress == "applied":
+            result.update(percent=candidate, basis="AI 辅助", confidence="实验",
+                          reason=assessment["explanation"])
+            result["range"] = [min(estimate["range"][0], candidate), max(estimate["range"][1], candidate)]
+    issued = assessment.get("at", now-assessment.get("age", 0))
+    low, mid, high = [issued+seconds for seconds in assessment["remaining_seconds"]]
+    advisor = {"finish": mid, "low": low, "high": high}
+    local = finish_prediction(estimate)
+    combined = blend_eta(local, advisor) if local and mid > now else None
+    timing = "observing"
+    if not local:
+        timing = "no_baseline"
+    elif mid <= now:
+        timing = "overdue"
+    elif use_time:
+        timing = "applied"
+        combined["low"] = max(now+1, min(combined["low"], combined["finish"]))
+        replace_time(result, combined, now, "本地时间预测 · AI 校正（权重 25%）")
+    result["ai_reference"] = assessment
+    result["ai_impact"] = {
+        "id": assessment.get("id"), "at": now,
+        "progress": progress, "base_percent": estimate["percent"],
+        "suggested_percent": candidate, "displayed_percent": result["percent"],
+        "timing": timing, "ai_finish": mid, "ai_range": [low, high],
+        "local_finish": local["finish"] if local else None,
+        "blend_finish": combined["finish"] if combined else None,
+        "displayed_finish": result.get("finish_at"),
+    }
     return result

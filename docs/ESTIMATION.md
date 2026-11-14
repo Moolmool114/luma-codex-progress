@@ -2,30 +2,32 @@
 
 ## Workload and evidence
 
-The optional MCP plugin binds to the selected chat and current turn through trusted hooks. It accepts stable deliverable IDs and integer weights totaling 10000. Reports carry a revision; stale updates and cross-turn writes are rejected. Completed work requires evidence.
+The optional MCP plugin binds the checklist to a chat and turn through trusted hooks. Each deliverable has a stable ID and an integer weight. Completed work requires evidence. An in-progress item earns proportional credit when it reports completed units, total units, and evidence. Rework can lower the displayed estimate.
 
-An in-progress deliverable earns zero work unless it reports completedUnits / totalUnits with evidence. Units should represent comparable, useful outputs. Changing scope, weights, labels, previously earned work or a unit total requires an explanation. There is no monotonic clamp: valid rework can lower an estimate immediately.
+## Whole-turn ETA
 
-The displayed point is the weighted reported completion. Its range is an explanatory scope bound, not a calibrated statistical confidence interval. Unknown future scope, inaccurate weights and mistaken reports can all make the actual percentage different. A local validator cannot prove semantic task completion.
+Luma records wall-clock time to the end of a Codex turn. The task class and request length, known tool starts and finishes, edits, checks, and recent activity feed the candidates for the overall forecast.
 
-Without a checklist, visible activity gives a broad, low-confidence fallback. This heuristic is not validated against engineering-completion ground truth. It should not be used as a contractual completion metric.
+The candidates include conditional historical duration, rolling historical duration, recency-weighted empirical quantiles, gradient-boosted activity, and activity with operation-duration features. The empirical estimates condition on a turn still running at the observed age. The learned candidates predict log remaining time at three quantiles.
 
-## Remaining time
+Up to 300 completed turns are divided chronologically for training, model selection, interval calibration, and final validation. Earlier partitions only use outcomes available by the partition boundary. Validation uses predetermined elapsed times while each turn is still active, starting at 5 and 30 seconds. Tool failures and steering messages enter a feature vector when their timestamps become visible.
 
-The time target is the end of the current Codex turn, rather than independent acceptance of a user goal. Features include request category and length, elapsed time, completed activity counts, running-tool age and time since edits or checks. Tool results are visible to training only after their actual completion time.
+If the selected alternative fails on the final validation split, the application falls back to the historical duration baseline. The split compares alternatives and checks deployment eligibility, so these results are retrospective validation. The separate journal measures prospective performance.
 
-Up to 300 completed user turns are split chronologically into 60% training, 20% calibration and 20% test. Each turn contributes observations at 15%, 30%, 50%, 70% and 90% of its duration. Quantile gradient-boosted regressors predict log remaining time at 10%, 50% and 90%. A separate calibration residual widens the range. The median model supplies the point estimate; the midpoint of an asymmetric interval would bias it upward.
+## Current operation
 
-A historical duration baseline is evaluated on the same held-out observations. The local model must meet its error/coverage guardrails and beat that baseline before it is used. Insufficient history, approval waits, stale activity or elapsed time beyond historical coverage can suppress ETA.
+The operation forecast uses start and finish metadata where available. A bounded read of the local rollout also picks up pending MCP calls when their projection appears only upon completion. Each category fits an empirical remaining-time distribution conditioned on the operation having already lasted this long. Calibration widens intervals using a separate time slice. Categories need enough historical examples and adequate held-out interval coverage to appear. Tool operations can overlap or repeat, so the whole-turn candidate uses operation estimates as features. It also captures work outside known tool boundaries.
 
-The development-machine example in README is one correlated local workload, not an independent cross-project study. Every user's results differ. The local metrics file also includes mean, P90 and relative error to make the long tail visible. Interval coverage is not task-progress accuracy.
+Server-side TTFT, queue time, and per-token decode speeds would require provider telemetry or a connected generation stream. The local observer measures public item wall times. A completed reply's duration can help estimate other observable replies but cannot account for remaining tools or upstream load. Related primary references are the [Codex app-server event docs](https://learn.chatgpt.com/docs/app-server), [vLLM metrics](https://docs.vllm.ai/en/latest/design/metrics/), and [Efficient Interactive LLM Serving with Proxy Model-based Sequence Length Prediction](https://arxiv.org/abs/2404.08509).
 
-## Optional semantic observer
+## Actual results and local learning
 
-A language model can help interpret missing scope, but is not automatically a better clock. The observer is opt-in and accepts an explicit endpoint, model and data-sharing consent. Its prompt treats task material as untrusted observations. Responses must be JSON, refer to the same turn and cite supplied public event IDs. Percentages, durations and ordering are validated locally.
+Luma records first and last emitted estimates before the actual Codex end time. It stores an overview of intermediate checkpoints, the forecast intervals, and their method. Delayed projections can reveal that a forecast was written after the turn ended. Those readings are discarded. The record is keyed by chat and turn, so late completions can be reconciled even after switching chats. Interrupted and failed turns remain visible in the record and are excluded from the accuracy comparison used for normal completions.
 
-It cannot change the checklist, erase earned work, exceed the active work range, or declare completion. Disagreement remains visible, and its time interval is combined with the local interval without claiming an improved calibrated confidence level. Results expire and are isolated by turn, checklist revision and endpoint/model settings.
+New completed turns trigger background retraining, at most every 15 minutes while the panel runs. On a failed validation, the previous validated model is retained. The journal contributes one record per elapsed-time band and completed turn. With enough data, the median log ratio of actual to predicted remaining time provides a bounded bias correction. A newer batch tests the correction before it changes the current estimate. The UI shows the latest training timestamp, the number of comparable runs, and measured first-forecast error. The interval method uses separate empirical calibration, inspired by [conformal prediction under distribution shift](https://arxiv.org/abs/2106.00170).
 
-No real provider result or precision improvement is claimed by the protocol tests. Providers support different structured-output subsets. The implementation follows the Chat Completions response_format convention; see [OpenAI's structured output documentation](https://developers.openai.com/api/docs/guides/structured-outputs).
+## AI time advice
 
-The most useful next research step is a consented evaluation dataset with independent semantic completion labels, compared across local-only, checklist-only and AI-assisted estimators. Until then, avoid advertising a percentage accuracy.
+The configured provider receives the existing opt-in subset of task data. The journal saves each request outcome, validated structured advice, evidence references, and how the application used it. Run-scoped requests are invalidated by a changed turn, checklist revision, prompt, or provider configuration. AI estimates of work continue to respect scoped completion evidence.
+
+For time, the app records a contemporaneous local prediction and an AI estimate of the same finish time. It also evaluates a candidate blend with 25% weight on AI. The earliest usable comparison in each successfully completed turn contributes to the provider's score. The candidate blend enters displayed estimates only after at least 12 paired turns and improvement in both median and mean absolute error. All recorded advice is still available for inspection.
