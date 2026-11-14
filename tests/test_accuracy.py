@@ -1,14 +1,16 @@
 """Behavioral checks for evidence boundaries and forecast causality."""
 import copy
+import io
 import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 from pulse.estimator import estimate
 from pulse.forecast import features
-from pulse.assessor import Assessor,KeyStore,context,endpoint_url,validate_result,apply_assessment,NoRedirect
+from pulse.assessor import Assessor,KeyStore,context,endpoint_url,validate_result,apply_assessment,NoRedirect,request_assessment,friendly_error
 
 TURN='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 def snapshot(**values):
@@ -86,6 +88,31 @@ class AssessorTests(unittest.TestCase):
         result=apply_assessment(value,{'assessment':{**self.valid,'percent':10,'age':0}})
         self.assertEqual(result['percent'],value['percent']);self.assertEqual(result['steps'],value['steps'])
         self.assertEqual(result['status'],'working')
+
+    def test_explicit_schema_rejection_falls_back_to_validated_json(self):
+        error=urllib.error.HTTPError('https://example.test/v1/chat/completions',400,'Bad request',{},io.BytesIO(b'{"error":{"message":"This response_format type is unavailable now"}}'))
+        response=unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value=json.dumps({'choices':[{'message':{'content':json.dumps(self.valid)}}]}).encode()
+        opener=unittest.mock.MagicMock();opener.open.side_effect=[error,response]
+        with patch('pulse.assessor.urllib.request.build_opener',return_value=opener):
+            value=request_assessment(dict(endpoint='https://example.test/v1',model='test',format='json_schema'),'dummy',self.payload)
+        self.assertTrue(value['format_fallback'])
+        sent=[json.loads(call.args[0].data) for call in opener.open.call_args_list]
+        self.assertEqual([x['response_format']['type'] for x in sent],['json_schema','json_object'])
+        self.assertEqual(sent[0]['messages'],sent[1]['messages'])
+
+    def test_auth_and_unknown_model_errors_never_trigger_format_retry(self):
+        for code,message in [(401,'Invalid key'),(400,'Unknown model')]:
+            error=urllib.error.HTTPError('https://example.test',code,'Failure',{},io.BytesIO(message.encode()))
+            opener=unittest.mock.MagicMock();opener.open.side_effect=error
+            with patch('pulse.assessor.urllib.request.build_opener',return_value=opener),self.assertRaises(urllib.error.HTTPError):
+                request_assessment(dict(endpoint='https://example.test/v1',model='test'),'',self.payload)
+            self.assertEqual(opener.open.call_count,1)
+
+    def test_service_errors_are_actionable_without_raw_response_data(self):
+        error=urllib.error.HTTPError('https://private.test',401,'SECRET_BODY',{},None)
+        output=friendly_error(error)
+        self.assertIn('401',output);self.assertNotIn('SECRET_BODY',output);self.assertNotIn('private.test',output)
 
     @unittest.skipUnless(os.name=='nt','Windows DPAPI')
     def test_key_is_encrypted_and_round_trips(self):

@@ -138,21 +138,44 @@ def request_assessment(config,key,payload):
     body=dict(model=config['model'],messages=[{'role':'system','content':instruction},{'role':'user','content':json.dumps(payload,ensure_ascii=False)}],response_format=response_format)
     headers={'Content-Type':'application/json','User-Agent':'Luma/0.2'}
     if key:headers['Authorization']='Bearer '+key
-    req=urllib.request.Request(url,data=json.dumps(body).encode(),headers=headers,method='POST')
-    with urllib.request.build_opener(NoRedirect).open(req,timeout=25) as response:
-        raw=response.read(128*1024+1)
-    if len(raw)>128*1024:raise ValueError('Assessor response is too large')
-    parsed=json.loads(raw)
+    opener=urllib.request.build_opener(NoRedirect)
+    def perform():
+        req=urllib.request.Request(url,data=json.dumps(body).encode(),headers=headers,method='POST')
+        with opener.open(req,timeout=25) as response:
+            raw=response.read(128*1024+1)
+        if len(raw)>128*1024:raise ValueError('Assessor response is too large')
+        return json.loads(raw)
+    compatibility=bool(config.get('_compatibility'))
+    try:parsed=perform()
+    except urllib.error.HTTPError as error:
+        if error.code!=400 or config.get('format')=='json_object':raise
+        # Some compatible services accept JSON mode but reject strict schemas.
+        # Retry only this explicit format rejection; never retry auth, quota,
+        # unknown models or arbitrary request failures. No response body is logged.
+        detail=error.read(8192).decode('utf-8',errors='replace').lower()
+        rejected='response_format' in detail and any(word in detail for word in ('unavailable','unsupported','not support','not available'))
+        if not rejected:raise
+        body['response_format']={'type':'json_object'}
+        parsed=perform();compatibility=True
     message=parsed['choices'][0]['message']
     if message.get('refusal'):raise ValueError('Assessor declined')
     text=message.get('content','')
-    return validate_result(json.loads(text),payload)
+    value=validate_result(json.loads(text),payload)
+    if compatibility:value['format_fallback']=True
+    return value
+
+
+def friendly_error(error):
+    if isinstance(error,urllib.error.HTTPError):
+        hints={400:'请求格式未被接受，请核对模型与 JSON 模式',401:'认证未通过，请检查 API Key',403:'服务拒绝访问，请检查权限或服务限制',404:'未找到接口或模型，请核对地址与模型 ID',429:'请求受限或额度不足，请检查服务账户'}
+        return hints.get(error.code,'服务暂不可用')+'（HTTP '+str(error.code)+'）'
+    return '服务未返回可用估算（'+type(error).__name__+'）'
 
 
 class Assessor:
     def __init__(self,data):
         self.keys=KeyStore(data);self.result=None;self.busy=False;self.error=None
-        self.last_request=0;self._lock=threading.Lock()
+        self.last_request=0;self._lock=threading.Lock();self.compatible=set()
 
     def inspect(self,config,snapshot,estimate):
         enabled=bool(config.get('enabled') and config.get('consent'))
@@ -175,11 +198,15 @@ class Assessor:
             key=self.keys.get()
             if urlsplit(config['endpoint']).hostname not in ('localhost','127.0.0.1','::1') and not key:
                 raise ValueError('A remote service requires an API key')
+            provider=(config.get('endpoint'),config.get('model'))
+            if config.get('format')!='json_object' and provider in self.compatible:
+                config={**config,'format':'json_object','_compatibility':True}
             value=request_assessment(config,key,payload)
+            if value.get('format_fallback'):self.compatible.add(provider)
             with self._lock:self.result=dict(value=value,scope=scope,fingerprint=fingerprint,at=at)
         except Exception as error:
             # Never echo response bodies, URLs, headers, or task content to logs.
-            self.error='服务未返回可用估算（'+type(error).__name__+'）'
+            self.error=friendly_error(error)
         finally:self.busy=False
 
 

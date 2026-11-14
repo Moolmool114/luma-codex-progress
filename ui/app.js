@@ -207,7 +207,7 @@ function render(next) {
   text("source-name", next.source);
   text("plugin-status", next.plugin_connected ? "已连接" : next.plugin_installed ? "已安装 · 等待新任务" : "未连接 · 只读模式");
   const ai = next.ai || {};
-  text("ai-status", !ai.enabled ? "关闭" : ai.error || (ai.busy ? "正在评估" : ai.assessment ? "参考已更新" : "等待评估"));
+  text("ai-status", !ai.enabled ? "关闭" : ai.error || (ai.busy ? "正在评估" : ai.assessment ? ai.assessment.format_fallback ? "参考已更新 · JSON 兼容模式" : "参考已更新" : "等待评估"));
   if (!settingsLoaded) $("cooperative").checked = next.cooperative;
   $("pin").setAttribute("aria-pressed", String(next.topmost));
   $("pin").setAttribute("aria-label", next.topmost ? "取消置顶" : "始终置顶");

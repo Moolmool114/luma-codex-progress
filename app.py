@@ -134,7 +134,7 @@ class Application:
         key=settings.get('key','')
         if key:self.assessor.keys.save(key)
         cfg=dict(enabled=enabled,consent=settings.get('consent') is True,endpoint=endpoint,model=model,format='json_object' if settings.get('format')=='json_object' else 'json_schema')
-        self.config['assessor']=cfg;self.assessor.result=None;self.save()
+        self.config['assessor']=cfg;self.assessor.result=None;self.assessor.compatible.clear();self.save()
         return self.preferences()
 
     def set_reduced_motion(self,value):
@@ -192,7 +192,7 @@ def make_server(app):
                     rows = app.source.threads(args.get("q", [""])[0])
                     return self.send(200, [{k: row[k] for k in ("id", "title", "updated_at")} for row in rows])
                 if name == "api/ping":
-                    return self.send(200, {"app": "Luma", "version": "0.2.0"})
+                    return self.send(200, {"app": "Luma", "version": "0.2.1"})
                 if name == 'api/settings':
                     return self.send(200,app.preferences())
                 allowed = {"index.html": "text/html; charset=utf-8", "app.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "format.js": "text/javascript; charset=utf-8"}
