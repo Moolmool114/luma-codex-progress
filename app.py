@@ -17,7 +17,7 @@ from pulse.estimator import classify, estimate
 from pulse.journal import PredictionJournal, TERMINAL
 from pulse.learning import calibrate, finish_prediction, replace_time, trust_advisor
 from pulse.source import CodexSource, read_json
-from pulse.forecast import LocalForecast
+from pulse.forecast import VERSION as FORECAST_VERSION, LocalForecast
 from pulse.assessor import Assessor, apply_assessment, endpoint_url
 
 ROOT = Path(__file__).resolve().parent
@@ -60,6 +60,7 @@ class Application:
         self.last_learning = 0
         self.calibration_records = []
         self.observed_scores = None
+        self.reference_scores = None
         self.advisor_scores = {}
         if demo and self.journal:
             from pulse.demo import seed_review
@@ -132,15 +133,20 @@ class Application:
                         sample = {
                             "at": now, "displayed": issued, "raw_local": raw_local, "local": local,
                             "local_method": method, "method": method + ("+learned" if learning["applied"] else ""),
+                            "engine": FORECAST_VERSION,
                         }
+                        reference = timing.get("reference_seconds")
+                        if reference is not None:
+                            sample["reference_finish"] = now + reference
                         if impact and impact["id"]:
                             sample.update(advisor=impact["id"], advisor_used=impact["timing"] == "applied")
                     self.journal.observe(selected, turn_id, kind, snapshot["started_at"], now, sample)
                     if impact and impact["id"]:
-                        self.journal.decide(impact["id"], impact)
+                        self.journal.decide(impact["id"], {**impact, "engine": FORECAST_VERSION})
             except (OSError, sqlite3.Error):
                 self.journal_error = True
         learning["observed"] = self.observed_scores
+        learning["reference"] = self.reference_scores
         model = self.forecast.model
         return {
             **prediction, "thread_id": selected, "title": snapshot["title"], "turn_id": turn_id,
@@ -176,10 +182,11 @@ class Application:
                         if self.journal.close_turn(thread_id, turn_id, status, ended_at):
                             self.last_learning = 0
             if now-self.last_learning >= 30:
-                self.calibration_records = self.journal.calibration(now)
+                self.calibration_records = self.journal.calibration(now, FORECAST_VERSION)
                 self.observed_scores = self.journal.observed_scores()
+                self.reference_scores = self.journal.reference_scores(FORECAST_VERSION)
                 provider = self.assessor.provider(self.config.get("assessor", {}))
-                self.advisor_scores = {provider: self.journal.advisor_scores(provider, now)}
+                self.advisor_scores = {provider: self.journal.advisor_scores(provider, now, FORECAST_VERSION)}
                 self.last_learning = now
                 self.journal_error = False
         except (OSError, sqlite3.Error):
@@ -317,7 +324,7 @@ def make_server(app):
                     rows = app.source.threads(args.get("q", [""])[0])
                     return self.send(200, [{k: row[k] for k in ("id", "title", "updated_at")} for row in rows])
                 if name == "api/ping":
-                    return self.send(200, {"app": "Luma", "version": "0.3.0"})
+                    return self.send(200, {"app": "Luma", "version": "0.4.0"})
                 if name == "api/predictions":
                     return self.send(200, app.prediction_history(
                         args.get("thread", [""])[0], args.get("turn", [None])[0]))

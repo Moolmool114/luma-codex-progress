@@ -66,6 +66,10 @@ def operation_profiles(runs):
             finish = item.get("finished")
             if kind and finish is not None:
                 duration = finish - item["started"]
+                # Older projections store completion only. Runner duration can
+                # seed a profile, but never creates an artificial live start.
+                if duration < .01:
+                    duration = item.get("reported_duration", 0)
                 if duration > 0 and finish <= run["started_at"] + run["seconds"] + 1:
                     durations[kind].append(duration)
     return {kind: sorted(values) for kind, values in durations.items()}
@@ -82,15 +86,20 @@ def operation_remaining(profiles, kind, age, expansion=0, minimum=12):
     if len(alive) < minimum:
         return None
     low, point, high = [quantile(alive, p) - age for p in (.1, .5, .9)]
-    low = max(1, round(expm1(log1p(low)-expansion)))
-    high = max(low, round(expm1(log1p(high)+expansion)))
+    low = max(0, expm1(log1p(low)-expansion))
+    high = max(low, expm1(log1p(high)+expansion))
+    low, high = max(1, int(low)), max(1, ceil(high))
     point = min(high, max(low, round(point)))
     return {"kind": kind, "label": LABELS[kind], "age": round(age),
             "range": [low, high], "median": point, "count": len(alive)}
 
 
+def operation_band(age):
+    return "under15" if age < 15 else "under60" if age < 60 else "over60"
+
+
 def operation_replay(profiles, runs, expansions=None):
-    """Hold out whole turns and score once per operation."""
+    """Score fixed ages using observed wall times as labels."""
     expansions = expansions or {}
     groups = defaultdict(list)
     for run in runs:
@@ -100,31 +109,35 @@ def operation_replay(profiles, runs, expansions=None):
             if not kind or finish is None:
                 continue
             duration = finish - item["started"]
-            if duration <= 4:
-                continue
-            forecast = operation_remaining(profiles, kind, 4, expansions.get(kind, 0))
-            if forecast:
-                groups[kind].append((forecast, duration - 4))
+            for age in (4, 15, 60):
+                if duration <= age:
+                    break
+                key = (kind, operation_band(age))
+                forecast = operation_remaining(profiles, kind, age, expansions.get(key, 0))
+                if forecast:
+                    groups[key].append((forecast, duration-age))
     return groups
 
 
 def calibrate_operations(profiles, runs):
     expansions = {}
-    for kind, rows in operation_replay(profiles, runs).items():
+    for key, rows in operation_replay(profiles, runs).items():
         if len(rows) < 12:
             continue
         errors = [max(log1p(f["range"][0])-log1p(actual), log1p(actual)-log1p(f["range"][1]))
                   for f, actual in rows]
-        expansions[kind] = max(0, quantile(sorted(errors), min(1, .8*(len(rows)+1)/len(rows))))
+        expansions[key] = max(0, quantile(sorted(errors), min(1, .8*(len(rows)+1)/len(rows))))
     return expansions
 
 
 def validate_operations(profiles, runs, expansions):
     groups = operation_replay(profiles, runs, expansions)
     results = {}
-    for kind, rows in groups.items():
+    for (kind, band), rows in groups.items():
         hits = sum(forecast["range"][0] <= actual <= forecast["range"][1] for forecast, actual in rows)
         errors = [abs(forecast["median"]-actual) for forecast, actual in rows]
-        results[kind] = {"count": len(rows), "coverage": round(hits/len(rows), 3),
-                         "median_error": round(median(errors), 1)}
+        results.setdefault(kind, {})[band] = {
+            "count": len(rows), "coverage": round(hits/len(rows), 3),
+            "median_error": round(median(errors), 1),
+        }
     return results

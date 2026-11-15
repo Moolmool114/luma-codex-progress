@@ -4,7 +4,8 @@ const review = (() => {
   const el = id => document.getElementById(id);
   const F = window.LumaFormat;
   const states = {completed: "已结束", interrupted: "已中断", failed: "执行失败"};
-  const methods = {duration: "同类时长", rolling: "更新后的历史时长", recent: "近期相似轮次",
+  const methods = {duration: "同类时长", rolling: "近期同类时长", recent: "近期相似轮次",
+    neighbours: "相似轮次", trace: "相似执行轨迹", blend: "历史时长＋相似轨迹",
     activity: "整轮活动", operations: "含操作时长"};
   const progressNotes = {same: "进度相符", outside_scope: "进度保留本地值", applied: "修改了进度"};
   const timingNotes = {
@@ -62,6 +63,13 @@ const review = (() => {
     el("review-verdict").hidden = !el("review-verdict").textContent;
     const metrics = el("review-forecasts");
     metrics.replaceChildren();
+    const baseline = el("review-baseline");
+    const pair = record.reference_pair;
+    baseline.hidden = !completed || !pair;
+    if (!baseline.hidden) {
+      baseline.textContent = timestamp(pair.at, now, false) + " 的同刻预测中，旧式基线" +
+        verdict(pair.reference_finish, ended) + "，当前本地模型" + verdict(pair.raw_local.finish, ended) + "。";
+    }
     const chart = el("review-chart");
     chart.replaceChildren();
     chart.hidden = !ended || !entries.length;
@@ -184,6 +192,11 @@ const review = (() => {
       addMetric(metrics, "首次预测误差", F.span(m.median), "绝对误差中位数");
       addMetric(metrics, "首次区间命中", Math.round(m.coverage*100) + "%");
     }
+    const paired = learning.reference;
+    const pairedNote = el("review-reference-scores");
+    pairedNote.hidden = !paired;
+    pairedNote.textContent = paired ? paired.local.count + " 轮实时对照中，旧式基线平均误差 " +
+      F.span(paired.baseline.mean) + "，当前本地模型 " + F.span(paired.local.mean) + "。" : "";
     el("review-learn-status").textContent = learning.applied ? "已校准当前预测" :
       learning.training ? "正在更新模型" : "持续记录";
     const trained = learning.trained_at ? "模型更新于 " + timestamp(learning.trained_at, data.now, false) + "。" : "";

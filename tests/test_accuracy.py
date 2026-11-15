@@ -9,7 +9,7 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 from pulse.estimator import estimate
-from pulse.forecast import features
+from pulse.analogues import prefix_state
 from pulse.assessor import Assessor,KeyStore,context,endpoint_url,validate_result,apply_assessment,NoRedirect,request_assessment,friendly_error
 
 TURN='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
@@ -42,8 +42,8 @@ class AccuracyTests(unittest.TestCase):
     def test_future_tool_failure_does_not_leak_into_prefix(self):
         live=dict(id='tool',type='commandExecution',command='node --test',started=1050,finished=None,at=1050,status='inProgress')
         completed={**live,'finished':1300,'at':1300,'status':'completed','exitCode':1}
-        self.assertEqual(features('Build',[live],1000,100),features('Build',[completed],1000,100))
-        self.assertNotEqual(features('Build',[live],1000,400),features('Build',[completed],1000,400))
+        self.assertEqual(prefix_state([live],1000,100),prefix_state([completed],1000,100))
+        self.assertNotEqual(prefix_state([live],1000,400),prefix_state([completed],1000,400))
 
     def test_eta_uses_predicted_median_not_range_midpoint(self):
         value=estimate(snapshot(),now=1200,time_prediction=dict(available=True,range=[60,600],median=100,reason='Held out model'))

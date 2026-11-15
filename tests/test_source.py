@@ -42,4 +42,22 @@ class SourceTests(unittest.TestCase):
             rows=CodexSource(Path(d),Path(d)).threads()
             self.assertEqual([r['id'] for r in rows],['user'])
 
+    def test_short_user_turns_count_and_guardian_reviews_do_not_train(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            with closing(sqlite3.connect(home/"state_5.sqlite")) as db, db:
+                db.execute("CREATE TABLE threads(id,cwd,updated_at,agent_role,thread_source)")
+                db.executemany("INSERT INTO threads VALUES(?,'.',100,NULL,?)",
+                               [("user", "user"), ("reviewer", "guardian_review")])
+            with closing(sqlite3.connect(home/"thread_history_1.sqlite")) as db, db:
+                db.execute("CREATE TABLE thread_turns(thread_id,turn_id,started_at,completed_at,duration_ms,status,first_user_item_id)")
+                db.execute("CREATE TABLE thread_items(thread_id,item_id,item_json)")
+                db.executemany("INSERT INTO thread_turns VALUES(?,?,?,?,?,'completed','req')",
+                               [("user","short",100,103,3000), ("user","future",110,125,15000),
+                                ("reviewer","approval",100,120,20000)])
+                db.executemany("INSERT INTO thread_items VALUES(?,'req',?)",
+                               [(thread, '{"content":[{"text":"hello"}]}') for thread in ("user", "reviewer")])
+            history = CodexSource(home, home).history(122)
+            self.assertEqual([(r["turn_id"], r["seconds"]) for r in history], [("short", 3)])
+
 if __name__=='__main__':unittest.main()

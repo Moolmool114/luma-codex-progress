@@ -29,7 +29,7 @@ def classify(prompt):
 
 
 def duration_forecast(history, kind, elapsed):
-    similar = [r["seconds"] for r in history if classify(r["prompt"]) == kind]
+    similar = [r["seconds"] for r in history if (r.get("kind") or classify(r["prompt"])) == kind]
     # A forecast is conditional on the run still being alive; never subtract the
     # elapsed time from an unconditional mean and get a permanently overdue ETA.
     if len(similar) < 6:

@@ -233,7 +233,14 @@ function render(next) {
   text("metric-error", m ? (m.medianAbsoluteErrorSeconds / 60).toFixed(1) + " 分钟" : "数据不足");
   text("metric-two", m ? Math.round(m.withinTwoMinutes * 100) + "%" : "—");
   text("metric-coverage", m ? Math.round(m.intervalObservedCoverage * 100) + "%" : "—");
-  if (m) $("metric-coverage").title = "目标覆盖80%；留出 " + m.testRuns + " 个轮次。多次截点评估互相关联。";
+  text("metric-samples", m ? m.testRuns + " 轮 · " + m.testPredictions + " 次预测" : "");
+  $("metric-coverage").title = m ? "目标覆盖 80%。同一轮的多个预测时点相互关联。" : "";
+  const previous = m?.baseline;
+  const comparison = previous && m.deployed;
+  $("metric-comparison").hidden = !comparison;
+  text("metric-comparison", comparison ? "与同批旧式基线相比，平均误差 " + F.span(previous.mean) +
+    " → " + F.span(m.deployed.mean) + "。误差 P90 " + F.span(previous.p90) + " → " +
+    F.span(m.deployed.p90) + "。" : "");
   text("source-name", next.source);
   text("plugin-status", next.plugin_connected ? "已连接" : next.plugin_installed ? "已安装 · 等待新任务" : "未连接 · 只读模式");
   const ai = next.ai || {};

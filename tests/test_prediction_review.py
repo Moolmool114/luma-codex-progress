@@ -7,10 +7,11 @@ from pathlib import Path
 
 from app import Application
 from pulse.assessor import apply_assessment
-from pulse.forecast import phase_features, samples
+from pulse.analogues import Analogues, prefix_state, request_at
+from pulse.forecast import TurnModel, historical_durations, reference_prior, replay
 from pulse.journal import PredictionJournal
 from pulse.learning import calibrate, trust_advisor
-from pulse.operations import operation_remaining
+from pulse.operations import operation_profiles, operation_remaining, operation_replay
 from pulse.source import CodexSource
 
 
@@ -40,6 +41,26 @@ class PredictionReviewTests(unittest.TestCase):
         self.assertEqual(reopened.observed_scores()["count"], 1)
         self.assertEqual(len(reopened.calibration(250)), 1)
         self.assertEqual(reopened.review("other-chat", "turn")["checkpoints"], [])
+
+    def test_live_reference_keeps_first_pair_across_upgrade_and_pruning(self):
+        for turn, status in (("finished", "completed"), ("cancelled", "interrupted")):
+            self.journal.observe("chat", turn, "general", 100, 103, forecast(103, 215))
+            self.journal.observe("chat", turn, "general", 100, 104, {**forecast(104, 240), "engine": 4})
+            for at, finish in ((105, 210), (106, 192), (200, 250)):
+                self.journal.observe("chat", turn, "general", 100, at, {
+                    **forecast(at, finish), "engine": 4, "reference_finish": 235,
+                    "displayed": forecast(at, finish+10)["displayed"],
+                })
+            self.journal.close_turn("chat", turn, status, 200)
+        review = self.journal.review("chat", "finished")
+        self.assertEqual(review["first"]["at"], 103)
+        self.assertEqual(review["reference_pair"]["at"], 105)
+        self.assertEqual(self.journal.calibration(250, engine=4)[0]["at"], 104)
+        scores = self.journal.reference_scores(4)
+        self.assertEqual(scores["local"]["count"], 1)
+        self.assertEqual(scores["local"]["mean"], 10)
+        self.assertEqual(scores["baseline"]["mean"], 35)
+        self.assertIsNone(self.journal.reference_scores(3))
 
     def test_switching_chat_still_closes_the_previous_turn(self):
         with closing(sqlite3.connect(self.data / "thread_history_1.sqlite")) as db, db:
@@ -104,6 +125,7 @@ class PredictionReviewTests(unittest.TestCase):
         self.assertEqual(scores["ai"]["median"], 10)
         self.assertEqual(scores["blend"]["median"], 25)
         self.assertFalse(trust_advisor(scores))
+        self.assertIsNone(self.journal.advisor_scores("provider", 240, engine=4)["local"])
 
     def test_advice_keeps_earlier_influence_after_it_expires(self):
         self.journal.observe("chat", "turn", "general", 100, 120, forecast(120, 240))
@@ -166,15 +188,49 @@ class PredictionReviewTests(unittest.TestCase):
         self.assertEqual(prediction["count"], 20)
         self.assertIsNone(operation_remaining(profile, "command", 20))
 
+    def test_runner_duration_can_seed_profiles_without_creating_replay_labels(self):
+        operation = {"type": "commandExecution", "started": 10, "finished": 10, "reported_duration": 17}
+        run = {"started_at": 1, "seconds": 20, "items": [operation]*12}
+        profile = operation_profiles([run])
+        self.assertEqual(operation_remaining(profile, "command", 5)["median"], 12)
+        self.assertEqual(operation_replay(profile, [run]), {})
+
     def test_fixed_checkpoints_cannot_see_future_steering_or_operation_outcomes(self):
         command = {"type": "commandExecution", "started": 102, "finished": 130, "at": 130, "exitCode": 1}
         running = {**command, "finished": None, "at": 102, "exitCode": None}
         run = {"prompt": "question", "requests": [(100, "question"), (130, "implement app")],
                "items": [command], "started_at": 100, "seconds": 60}
-        profiles = {"command": [20]*20}
-        observed, _ = samples([run], lambda p, i, s, e: phase_features(p, i, s, e, profiles), fixed=True)
-        live = phase_features("question", [running], 100, 5, profiles)
-        self.assertEqual(observed[0], live)
+        self.assertEqual(request_at(run, 105), "question")
+        self.assertEqual(prefix_state([command], 100, 5), prefix_state([running], 100, 5))
+        self.assertNotEqual(prefix_state([command], 100, 35), prefix_state([running], 100, 35))
+
+    def test_analogue_excludes_concurrent_outcomes_and_completed_shorter_turns(self):
+        def turn(index, start, duration):
+            return {"thread_id": "chat", "turn_id": str(index), "started_at": start,
+                    "completed_at": start+duration, "seconds": duration, "prompt": "fix", "items": []}
+
+        prior = [turn(index, 100+index, 75) for index in range(8)]
+        too_short = [turn(index, 100, 5) for index in range(10, 40)]
+        unfinished_outcomes = [turn(index, 240, 270) for index in range(40, 70)]
+        model = Analogues(prior + too_short + unfinished_outcomes)
+        current = turn(100, 250, 50)
+        self.assertEqual(model.predict(current, 20), ([55, 55, 55], [55, 55, 55]))
+        self.assertEqual(model.predict(current, 80), (None, None))
+
+    def test_replay_emits_each_live_checkpoint_before_the_end(self):
+        runs = [{"thread_id": "chat", "turn_id": str(index), "started_at": index*100,
+                 "completed_at": index*100+18, "seconds": 18, "prompt": "hello", "items": []}
+                for index in range(1, 11)]
+        past = historical_durations(runs[:-1])
+        result = list(replay(TurnModel(runs), runs[-1:], past, past))
+        self.assertEqual([row["elapsed"] for row in result], [2, 5, 15])
+        self.assertEqual([row["actual"] for row in result], [16, 13, 3])
+
+    def test_reference_only_scores_earlier_completed_turns(self):
+        past = [{"end": 100, "seconds": 20, "kind": "general"}]*6
+        unfinished = [{"end": 120, "seconds": 75, "kind": "general"}]*20
+        self.assertEqual(reference_prior(past+unfinished, [], "hello", 5, 110),
+                         reference_prior(past, [], "hello", 5, 110))
 
 
 if __name__ == "__main__":

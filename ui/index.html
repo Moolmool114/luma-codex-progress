@@ -67,7 +67,11 @@
   <div class="sheet-scroll">
    <div class="detail-block"><span class="metric-label">工作量</span><h3 id="detail-basis">—</h3><p id="detail-reason">—</p><p id="confirmed-note"></p><p id="revision-note"></p></div>
    <div class="detail-block"><span class="metric-label">时间预测</span><p id="eta-basis">—</p><p id="finish-range"></p><p id="operation-details"></p><p id="learning-details"></p></div>
-   <div class="model-evaluation"><div class="section-heading"><h3>本机留出回放</h3><span>时间预测，非工程完成度</span></div><dl><div><dt>误差中位数</dt><dd id="metric-error">—</dd></div><div><dt>两分钟内</dt><dd id="metric-two">—</dd></div><div><dt>区间覆盖</dt><dd id="metric-coverage">—</dd></div></dl></div>
+   <div class="model-evaluation">
+    <div class="section-heading"><h3>本机留出回放</h3><span id="metric-samples"></span></div>
+    <dl><div><dt>误差中位数</dt><dd id="metric-error">—</dd></div><div><dt>两分钟内</dt><dd id="metric-two">—</dd></div><div><dt>区间覆盖</dt><dd id="metric-coverage">—</dd></div></dl>
+    <p class="detail-footnote" id="metric-comparison" hidden></p>
+   </div>
    <div class="detail-block source-facts"><div><span>会话来源</span><span id="source-name">—</span></div><div><span>清单协作</span><span id="plugin-status">—</span></div><div><span>AI 语义参考</span><span id="ai-status">关闭</span></div></div>
    <button class="text-button review-from-detail" id="detail-review">查看预测记录<svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button>
   </div>
@@ -82,6 +86,7 @@
     <div class="review-result"><strong id="review-ended"></strong><span id="review-verdict"></span></div>
     <div id="review-chart" class="review-chart" role="img"></div>
     <dl id="review-forecasts" class="review-forecasts"></dl>
+    <p class="review-copy" id="review-baseline" hidden></p>
    </section>
    <section id="review-ai" class="review-section" aria-labelledby="review-ai-title" hidden>
     <div class="section-heading"><h3 id="review-ai-title">AI 做了什么</h3><span id="review-ai-count"></span></div>
@@ -92,6 +97,7 @@
     <div class="section-heading"><h3 id="review-learning-title">本机学习</h3><span id="review-learn-status"></span></div>
     <p class="review-copy" id="review-learn-detail"></p>
     <dl class="review-metrics" id="review-learn-metrics"></dl>
+    <p class="review-copy" id="review-reference-scores" hidden></p>
    </section>
    <section id="review-history-block" class="review-section" aria-label="预测时间线" hidden>
     <details id="review-history"><summary>预测时间线 <span id="review-history-count"></span></summary><ol class="review-checkpoints" id="review-checkpoints"></ol></details>

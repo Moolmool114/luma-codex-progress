@@ -12,4 +12,6 @@ The survey also examined **wudongshu2002/codex-pulse**, commit `b8732a4a98081559
 
 Other surveyed projects: **LH-03/agent-monitor-hud**, **StevenSong77/codexstar**. They provide Windows activity/status UIs rather than the requested task-completion estimate.
 
-Runtime dependencies: Python 3, pywebview (BSD), pythonnet (MIT), NumPy (BSD), scikit-learn (BSD), Microsoft Edge WebView2 Runtime. Already installed runtime dependencies are used; this app does not bundle or download them.
+The timing work draws on [TraceLab](https://github.com/uw-syfi/TraceLab), [AgentTimeBench](https://github.com/michaelofengenden/agenttimebench), and [the remaining-time benchmark](https://github.com/verenich/time-prediction-benchmark). These contributions are methodological references. Details are in [Estimation method](docs/ESTIMATION.md).
+
+Runtime dependencies: Python 3, pywebview (BSD), pythonnet (MIT), NumPy (BSD), Microsoft Edge WebView2 Runtime. The app uses installed runtime dependencies.

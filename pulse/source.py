@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 
-VISIBLE_TYPES = ("userMessage", "agentMessage", "commandExecution", "fileChange", "mcpToolCall", "plan", "webSearch", "imageGeneration")
+VISIBLE_TYPES = ("userMessage", "agentMessage", "commandExecution", "fileChange", "mcpToolCall", "plan",
+                 "webSearch", "imageGeneration", "collabAgentToolCall", "contextCompaction")
 NATIVE_ITEM_TYPES = {key[0].upper() + key[1:]: key for key in VISIBLE_TYPES}
 
 
@@ -85,7 +86,8 @@ class CodexSource:
                 state = self._from_rollout(path)
             if state["status"] in ("inProgress", "in_progress"):
                 state["items"].extend(self._live_tool_calls(path, state))
-            state.update(thread_id=thread_id, title=thread.get("name") or thread.get("title") or "未命名对话", cwd=thread.get("cwd", ""))
+            state.update(thread_id=thread_id, title=thread.get("name") or thread.get("title") or "未命名对话",
+                         project=thread.get("project_id") or thread.get("cwd") or "", cwd=thread.get("cwd", ""))
             state["hook"] = read_json(self.data / "events" / f"{thread_id}.json", {})
             state["checklist"] = read_json(self.data / "checklists" / f"{thread_id}.json", {})
             state["source_age"] = max(0, time.time() - state.get("last_activity", time.time()))
@@ -282,9 +284,10 @@ class CodexSource:
                 state["last_activity"] = at
         return state
 
-    def history(self):
+    def history(self, through=None, legacy=False):
         with self._lock:
-            if time.time() - self._history_at < 120:
+            cache = through is None and not legacy
+            if cache and time.time() - self._history_at < 120:
                 return self._history
             try:
                 # Internal approval reviewers and worker agents are not ordinary
@@ -293,19 +296,38 @@ class CodexSource:
                     columns={r[1] for r in state_db.execute('PRAGMA table_info(threads)')}
                     where="WHERE agent_role IS NULL" if 'agent_role' in columns else 'WHERE 1=1'
                     if 'thread_source' in columns:
-                        where+=" AND COALESCE(thread_source,'')<>'subagent'"
-                    ids=[r[0] for r in state_db.execute(f'SELECT id FROM threads {where} ORDER BY updated_at DESC LIMIT 500')]
+                        where += (" AND COALESCE(thread_source,'')<>'subagent'" if legacy else
+                                  " AND COALESCE(thread_source,'') NOT IN ('subagent','guardian_review')")
+                    project = "COALESCE(NULLIF(project_id,''),cwd)" if "project_id" in columns else "cwd"
+                    projects = {r["id"]: r["project"] for r in state_db.execute(
+                        f"SELECT id,{project} AS project FROM threads {where} ORDER BY updated_at DESC LIMIT 750"
+                    )}
+                    ids = list(projects)
                 if not ids:
                     return []
                 with connect_readonly(self.home / "thread_history_1.sqlite") as c:
                     slots=','.join('?' for _ in ids)
-                    rows = c.execute(f"""SELECT t.thread_id,t.turn_id,t.started_at,t.duration_ms,substr(json_extract(i.item_json,'$.content[0].text'),1,2000) AS prompt FROM thread_turns t
-                      JOIN thread_items i ON i.thread_id=t.thread_id AND i.item_id=t.first_user_item_id
-                                WHERE t.status='completed' AND t.duration_ms BETWEEN 15000 AND 21600000
-                      AND t.thread_id IN ({slots})
-                      ORDER BY t.started_at DESC LIMIT 300""",ids).fetchall()
-                    self._history = [{"seconds": r["duration_ms"] / 1000, "prompt": r['prompt'] or '',"thread_id":r['thread_id'],"turn_id":r['turn_id'],"started_at":r['started_at'] or 0} for r in rows]
+                    rows = c.execute(f"""
+                        SELECT t.thread_id,t.turn_id,t.started_at,t.completed_at,t.duration_ms,
+                               substr(json_extract(i.item_json,'$.content[0].text'),1,2000) AS prompt
+                        FROM thread_turns t
+                        JOIN thread_items i ON i.thread_id=t.thread_id AND i.item_id=t.first_user_item_id
+                        WHERE t.status='completed' AND t.duration_ms BETWEEN ? AND 21600000
+                          AND t.started_at>0 AND t.completed_at>=t.started_at
+                          AND t.completed_at<=? AND t.thread_id IN ({slots})
+                        ORDER BY t.started_at DESC,t.turn_id DESC LIMIT ?
+                    """, [15000 if legacy else 250, through if through is not None else time.time(),
+                          *ids, 300 if legacy else 600]).fetchall()
+                    records = [
+                        {"seconds": row["duration_ms"]/1000, "prompt": row["prompt"] or "",
+                         "thread_id": row["thread_id"], "turn_id": row["turn_id"],
+                         "started_at": row["started_at"], "completed_at": row["completed_at"],
+                         "project": projects[row["thread_id"]]}
+                        for row in rows
+                    ]
             except (sqlite3.Error, OSError, ValueError):
-                self._history = []
-            self._history_at = time.time()
-            return self._history
+                records = []
+            if cache:
+                self._history = records
+                self._history_at = time.time()
+            return records

@@ -92,13 +92,14 @@ class PredictionJournal:
                 return False
             db.execute("DELETE FROM predictions WHERE thread_id=? AND turn_id=? AND at>=?",
                        (thread_id, turn_id, ended_at))
-            # Preserve the first, the exact last, and one reading per 45 seconds.
-            # Each elapsed-band boundary is a multiple of 45 seconds.
+            # Preserve the first reading per 45 seconds, engine and presence of
+            # a paired forecast, as well as the exact last reading.
             db.execute("""
                 DELETE FROM predictions WHERE thread_id=? AND turn_id=? AND at IN (
                     SELECT at FROM (
-                        SELECT at, row_number() OVER (PARTITION BY CAST((at-started_at)/45 AS INTEGER)
-                                                       ORDER BY at) AS rank,
+                        SELECT at, row_number() OVER (PARTITION BY CAST((at-started_at)/45 AS INTEGER),
+                            COALESCE(json_extract(sample,'$.engine'),3),
+                            json_extract(sample,'$.reference_finish') IS NOT NULL ORDER BY at) AS rank,
                                    max(at) OVER () AS last
                         FROM predictions JOIN observed_turns USING(thread_id,turn_id)
                         WHERE thread_id=? AND turn_id=?
@@ -163,6 +164,17 @@ class PredictionJournal:
                 SELECT sample FROM predictions WHERE thread_id=? AND turn_id=? AND at<?
                 ORDER BY at LIMIT 1
             """, key).fetchone()
+            initial = json.loads(first[0]) if first else None
+            pair = None
+            if initial:
+                pair = initial if "reference_finish" in initial else None
+                if pair is None:
+                    found = db.execute("""
+                        SELECT sample FROM predictions WHERE thread_id=? AND turn_id=? AND at<?
+                          AND json_extract(sample,'$.reference_finish') IS NOT NULL
+                        ORDER BY at LIMIT 1
+                    """, key).fetchone()
+                    pair = json.loads(found[0]) if found else None
             advice = []
             for row in db.execute("""
                 SELECT event,decision,latest_decision FROM assessments WHERE thread_id=? AND turn_id=?
@@ -185,11 +197,10 @@ class PredictionJournal:
 
         if not turn:
             return {"turn_id": turn_id, "checkpoints": [], "advice": advice}
-        initial = json.loads(first[0]) if first else None
         latest = checkpoints[0] if checkpoints else None
         return {
             "turn_id": turn_id, "started_at": turn["started_at"], "ended_at": ended,
-            "status": turn["status"], "first": initial, "last": latest,
+            "status": turn["status"], "first": initial, "last": latest, "reference_pair": pair,
             "checkpoints": checkpoints, "advice": advice,
         }
 
@@ -216,7 +227,7 @@ class PredictionJournal:
                 "first": json.loads(row["first"]) if row["first"] else None,
                 "last": json.loads(row["last"]) if row["last"] else None}
 
-    def calibration(self, now):
+    def calibration(self, now, engine=None):
         """One checkpoint per prior completed turn and elapsed band."""
         with self.connect() as db:
             rows = db.execute("""
@@ -224,8 +235,9 @@ class PredictionJournal:
                 FROM (SELECT * FROM observed_turns WHERE status='completed' AND ended_at<?
                       ORDER BY ended_at DESC LIMIT 180) t
                 JOIN predictions p ON p.thread_id=t.thread_id AND p.turn_id=t.turn_id
-                WHERE p.at<t.ended_at ORDER BY t.ended_at DESC,p.at LIMIT 12000
-            """, (now,)).fetchall()
+                WHERE p.at<t.ended_at AND (? IS NULL OR COALESCE(json_extract(p.sample,'$.engine'),3)=?)
+                ORDER BY t.ended_at DESC,p.at LIMIT 12000
+            """, (now, engine, engine)).fetchall()
         seen = set()
         records = []
         for row in rows:
@@ -242,15 +254,16 @@ class PredictionJournal:
                 })
         return records
 
-    def advisor_scores(self, provider, now):
+    def advisor_scores(self, provider, now, engine=None):
         """Compare AI and the local forecast first paired in each successful turn."""
         with self.connect() as db:
             rows = db.execute("""
                 SELECT a.thread_id,a.turn_id,a.event,a.decision,t.ended_at
                 FROM assessments a JOIN observed_turns t USING (thread_id,turn_id)
                 WHERE a.provider=? AND a.decision IS NOT NULL AND t.status='completed' AND t.ended_at<?
+                  AND (? IS NULL OR COALESCE(json_extract(a.decision,'$.engine'),3)=?)
                 ORDER BY t.ended_at DESC, a.at LIMIT 800
-            """, (provider, now)).fetchall()
+            """, (provider, now, engine, engine)).fetchall()
         seen = set()
         groups = {"local": [], "ai": [], "blend": []}
         for row in rows:
@@ -269,6 +282,26 @@ class PredictionJournal:
             if len(seen) == 60:
                 break
         return {name: error_stats(values) for name, values in groups.items()}
+
+    def reference_scores(self, engine):
+        """Compare the first issued local forecast pair from each successful turn."""
+        with self.connect() as db:
+            rows = db.execute("""
+                SELECT t.ended_at,(SELECT p.sample FROM predictions p
+                    WHERE p.thread_id=t.thread_id AND p.turn_id=t.turn_id AND p.at<t.ended_at
+                      AND json_extract(p.sample,'$.engine')=?
+                      AND json_extract(p.sample,'$.reference_finish') IS NOT NULL
+                    ORDER BY p.at LIMIT 1) AS first
+                FROM observed_turns t WHERE t.status='completed'
+                ORDER BY t.ended_at DESC LIMIT 180
+            """, (engine,)).fetchall()
+        local, baseline = [], []
+        for row in rows:
+            if row["first"]:
+                first = json.loads(row["first"])
+                local.append((first["raw_local"]["finish"], row["ended_at"]))
+                baseline.append((first["reference_finish"], row["ended_at"]))
+        return {"local": error_stats(local), "baseline": error_stats(baseline)} if local else None
 
     def observed_scores(self):
         with self.connect() as db:
